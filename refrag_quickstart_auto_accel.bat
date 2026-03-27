@@ -7,7 +7,9 @@ if "%ENC_MODEL%"=="" set ENC_MODEL=roberta-base
 set DEC_MODEL=%DEC_MODEL%
 if "%DEC_MODEL%"=="" set DEC_MODEL=LiquidAI/LFM2-350M
 set EMBED_MODEL=%EMBED_MODEL%
-if "%EMBED_MODEL%"=="" set EMBED_MODEL=BAAI/bge-small-en-v1.5
+if "%EMBED_MODEL%"=="" set EMBED_MODEL=ollama://mxbai-embed-large:335m
+set OLLAMA_URL=%OLLAMA_URL%
+if "%OLLAMA_URL%"=="" set OLLAMA_URL=http://localhost:8089
 set TOPK=%TOPK%
 if "%TOPK%"=="" set TOPK=4
 set K=%K%
@@ -58,17 +60,31 @@ if %errorlevel%==0 (
   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 )
 
-REM FAISS on Windows: use CPU (faiss-gpu wheels are not provided for Windows on pip)
-pip install faiss-cpu
+REM FAISS replaced by Qdrant
+pip install qdrant-client
 
 REM Common deps
 pip install "transformers==4.57.3" accelerate sentencepiece sacrebleu numpy
 
 set TOKENIZERS_PARALLELISM=false
 
+set QDRANT_URL=%QDRANT_URL%
+if "%QDRANT_URL%"=="" set QDRANT_URL=http://localhost:6343
+set COLLECTION=%COLLECTION%
+if "%COLLECTION%"=="" set COLLECTION=refrag
+
+REM Start Qdrant container if not running
+curl -sf "%QDRANT_URL%/collections" >nul 2>nul
+if errorlevel 1 (
+  echo Starting Qdrant container...
+  docker run -d --name refrag-qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant:latest
+  timeout /t 10 /nobreak >nul
+  echo Qdrant ready.
+)
+
 REM 1) Toy corpus + index
 mkdir data 2>nul
-mkdir runs\index 2>nul
+mkdir runs 2>nul
 
 (
 echo Alexander Fleming discovered penicillin in 1928 at St. Mary's Hospital in London.
@@ -80,13 +96,17 @@ echo Large language models can use retrieval to augment their context.
 
 python refrag.py index ^
   --corpus data\wiki_lines.txt ^
-  --index_dir runs\index ^
-  --embed_model %EMBED_MODEL%
+  --qdrant_url %QDRANT_URL% ^
+  --collection %COLLECTION% ^
+  --embed_model %EMBED_MODEL% ^
+  --ollama_url %OLLAMA_URL%
 
 REM 2) Quick generate
 python refrag.py generate ^
-  --index_dir runs\index ^
+  --qdrant_url %QDRANT_URL% ^
+  --collection %COLLECTION% ^
   --embed_model %EMBED_MODEL% ^
+  --ollama_url %OLLAMA_URL% ^
   --enc %ENC_MODEL% ^
   --dec %DEC_MODEL% ^
   --question "Who discovered penicillin?" ^
@@ -136,8 +156,10 @@ echo {"id":"q2","question":"What is the capital of France?","answers":["Paris"]}
 
 python refrag.py train_policy ^
   --rag_json data\rag_train.jsonl ^
-  --index_dir runs\index ^
+  --qdrant_url %QDRANT_URL% ^
+  --collection %COLLECTION% ^
   --embed_model %EMBED_MODEL% ^
+  --ollama_url %OLLAMA_URL% ^
   --enc %ENC_MODEL% ^
   --dec %DEC_MODEL% ^
   --k 32 ^
@@ -150,8 +172,10 @@ python refrag.py train_policy ^
 
 echo ---- Generate with trained policy ----
 python refrag.py generate ^
-  --index_dir runs\index ^
+  --qdrant_url %QDRANT_URL% ^
+  --collection %COLLECTION% ^
   --embed_model %EMBED_MODEL% ^
+  --ollama_url %OLLAMA_URL% ^
   --enc %ENC_MODEL% ^
   --dec %DEC_MODEL% ^
   --load_dir runs\policy ^
@@ -160,8 +184,10 @@ python refrag.py generate ^
 
 echo ---- Generate with CPT-tuned full model ----
 python refrag.py generate ^
-  --index_dir runs\index ^
+  --qdrant_url %QDRANT_URL% ^
+  --collection %COLLECTION% ^
   --embed_model %EMBED_MODEL% ^
+  --ollama_url %OLLAMA_URL% ^
   --enc %ENC_MODEL% ^
   --dec %DEC_MODEL% ^
   --load_dir runs\cpt_next ^

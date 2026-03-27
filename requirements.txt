@@ -1,0 +1,12 @@
+torch>=2.0
+torchvision
+torchaudio
+transformers==4.57.3
+accelerate
+sentencepiece
+numpy
+qdrant-client>=1.7.0
+sacrebleu
+pypdf>=4.0
+tiktoken>=0.5.0
+streamlit>=1.30.0

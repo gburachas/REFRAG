@@ -4,7 +4,8 @@ set -euo pipefail
 # ===== Settings (customize) =====
 ENC_MODEL="${ENC_MODEL:-roberta-base}"
 DEC_MODEL="${DEC_MODEL:-meta-llama/Llama-3.2-3B}"
-EMBED_MODEL="${EMBED_MODEL:-BAAI/bge-small-en-v1.5}"
+EMBED_MODEL="${EMBED_MODEL:-ollama://mxbai-embed-large:335m}"
+OLLAMA_URL="${OLLAMA_URL:-http://localhost:8089}"
 TOPK="${TOPK:-4}"
 K="${K:-32}"
 P="${P:-0.25}"
@@ -51,24 +52,19 @@ echo "Detected OS: $OS; NVIDIA: $HAS_NVIDIA; ROCm: $HAS_ROCM"
 if [[ "$OS" == "Linux" && "$HAS_NVIDIA" == "1" ]]; then
   echo "Installing PyTorch CUDA (cu121)"
   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-  echo "Trying faiss-gpu, falling back to faiss-cpu if needed..."
-  (pip install faiss-gpu && echo "faiss-gpu installed") || (pip install faiss-cpu && echo "faiss-cpu installed")
 elif [[ "$OS" == "Linux" && "$HAS_ROCM" == "1" ]]; then
-  echo "Installing PyTorch ROCm (rocm6.0) and faiss-cpu"
+  echo "Installing PyTorch ROCm (rocm6.0)"
   pip install --index-url https://download.pytorch.org/whl/rocm6.0 torch torchvision torchaudio
-  pip install faiss-cpu
 elif [[ "$OS" == "Darwin" ]]; then
   echo "Installing PyTorch for macOS (MPS supported if on Apple Silicon/macOS 12.3+)"
   pip install torch torchvision torchaudio
-  pip install faiss-cpu
 else
   echo "Installing CPU-only PyTorch"
   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-  pip install faiss-cpu
 fi
 
-# Common deps
-pip install "transformers==4.57.3" accelerate sentencepiece sacrebleu numpy
+# Common deps (qdrant-client replaces faiss)
+pip install "transformers==4.57.3" accelerate sentencepiece sacrebleu numpy qdrant-client
 
 # ---- Patch refrag.py to use MPS if available (and keep CUDA/CPU fallback) ----
 python - <<'PY'
@@ -97,8 +93,22 @@ PY
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 
-# 1) Toy corpus + index
-mkdir -p data runs/index
+# 1) Toy corpus + index (requires Qdrant — start a container if not running)
+QDRANT_URL="${QDRANT_URL:-http://localhost:6343}"
+COLLECTION="${COLLECTION:-refrag}"
+
+if ! curl -sf "${QDRANT_URL}/collections" >/dev/null 2>&1; then
+  echo "Starting Qdrant container..."
+  docker run -d --name refrag-qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant:latest
+  # Wait for Qdrant to be ready
+  for i in $(seq 1 30); do
+    curl -sf "${QDRANT_URL}/collections" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  echo "Qdrant ready."
+fi
+
+mkdir -p data runs
 cat > data/wiki_lines.txt << 'EOF'
 Alexander Fleming discovered penicillin in 1928 at St. Mary's Hospital in London.
 The capital of France is Paris.
@@ -109,13 +119,16 @@ EOF
 
 python refrag.py index \
   --corpus data/wiki_lines.txt \
-  --index_dir runs/index \
-  --embed_model "${EMBED_MODEL}"
-
-# 2) Quick generate
-python refrag.py generate \
-  --index_dir runs/index \
+  --qdrant_url "${QDRANT_URL}" \
+  --collection "${COLLECTION}" \
   --embed_model "${EMBED_MODEL}" \
+  --ollama_url "${OLLAMA_URL}"
+
+python refrag.py generate \
+  --qdrant_url "${QDRANT_URL}" \
+  --collection "${COLLECTION}" \
+  --embed_model "${EMBED_MODEL}" \
+  --ollama_url "${OLLAMA_URL}" \
   --enc "${ENC_MODEL}" \
   --dec "${DEC_MODEL}" \
   --question "Who discovered penicillin?" \
@@ -165,8 +178,10 @@ EOF
 
 python refrag.py train_policy \
   --rag_json data/rag_train.jsonl \
-  --index_dir runs/index \
+  --qdrant_url "${QDRANT_URL}" \
+  --collection "${COLLECTION}" \
   --embed_model "${EMBED_MODEL}" \
+  --ollama_url "${OLLAMA_URL}" \
   --enc "${ENC_MODEL}" \
   --dec "${DEC_MODEL}" \
   --k 32 \
@@ -179,8 +194,10 @@ python refrag.py train_policy \
 
 echo "---- Generate with trained policy ----"
 python refrag.py generate \
-  --index_dir runs/index \
+  --qdrant_url "${QDRANT_URL}" \
+  --collection "${COLLECTION}" \
   --embed_model "${EMBED_MODEL}" \
+  --ollama_url "${OLLAMA_URL}" \
   --enc "${ENC_MODEL}" \
   --dec "${DEC_MODEL}" \
   --load_dir runs/policy \
@@ -189,8 +206,10 @@ python refrag.py generate \
 
 echo "---- Generate with CPT-tuned full model ----"
 python refrag.py generate \
-  --index_dir runs/index \
+  --qdrant_url "${QDRANT_URL}" \
+  --collection "${COLLECTION}" \
   --embed_model "${EMBED_MODEL}" \
+  --ollama_url "${OLLAMA_URL}" \
   --enc "${ENC_MODEL}" \
   --dec "${DEC_MODEL}" \
   --load_dir runs/cpt_next \

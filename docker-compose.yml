@@ -1,0 +1,107 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  refrag:
+    build: .
+    network_mode: host
+    environment:
+      - QDRANT_URL=http://localhost:6343
+      - TOKENIZERS_PARALLELISM=false
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./runs:/app/runs
+      - ./data:/app/data
+      - /home/giedrius/Projects/TandE/Data4examples:/app/external_data:ro
+      - hf_cache:/root/.cache/huggingface
+    # Usage:
+    #   docker compose --profile app run refrag index --corpus /app/external_data/prompt-engineering-papers --qdrant_url http://localhost:6343
+    profiles:
+      - app
+
+  # GPU-enabled variant — use with:  docker compose --profile gpu run refrag-gpu <args>
+  refrag-gpu:
+    build: .
+    network_mode: host
+    environment:
+      - QDRANT_URL=http://localhost:6343
+      - TOKENIZERS_PARALLELISM=false
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./runs:/app/runs
+      - ./data:/app/data
+      - /home/giedrius/Projects/TandE/Data4examples:/app/external_data:ro
+      - hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - gpu
+
+  # Streamlit UI
+  refrag-ui:
+    build: .
+    network_mode: host
+    entrypoint: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    environment:
+      - QDRANT_URL=http://localhost:6343
+      - TOKENIZERS_PARALLELISM=false
+      - PYTHONUNBUFFERED=1
+      - HF_TOKEN=${HF_TOKEN}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+    volumes:
+      - ./runs:/app/runs
+      - ./data:/app/data
+      - /home/giedrius/.cache/huggingface:/root/.cache/huggingface
+      - /data1/giedrius/.cache/huggingface/hub:/root/.cache/huggingface/hub
+      - /data2/models:/data2/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1', '2']
+              capabilities: [gpu]
+    profiles:
+      - ui
+
+  # Training job — uses GPUs 0+3 (while UI runs on 1+2)
+  refrag-train:
+    build: .
+    network_mode: host
+    entrypoint: ["python", "train.py"]
+    environment:
+      - QDRANT_URL=http://localhost:6343
+      - TOKENIZERS_PARALLELISM=false
+      - PYTHONUNBUFFERED=1
+      - HF_TOKEN=${HF_TOKEN}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+    volumes:
+      - ./runs:/app/runs
+      - ./data:/app/data
+      - /home/giedrius/.cache/huggingface:/root/.cache/huggingface
+      - /data1/giedrius/.cache/huggingface/hub:/root/.cache/huggingface/hub
+      - /data2/models:/data2/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0', '3']
+              capabilities: [gpu]
+    profiles:
+      - train
+
+volumes:
+  qdrant_storage:
+  hf_cache:
